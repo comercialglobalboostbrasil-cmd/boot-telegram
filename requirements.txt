@@ -1,0 +1,6 @@
+aiogram==3.*
+fastapi
+uvicorn
+requests
+python-dotenv
+pillow
