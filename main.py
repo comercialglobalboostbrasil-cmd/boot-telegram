@@ -52,7 +52,7 @@ APP_PORT = int(os.getenv("PORT", "10000"))
 
 DB_PATH = "db.sqlite3"
 
-# validações mínimas (evita “rodar quebrado” sem você perceber)
+# validações mínimas
 missing = []
 if not BOT_TOKEN: missing.append("BOT_TOKEN")
 if not INVICTUS_API_TOKEN: missing.append("INVICTUS_API_TOKEN")
@@ -154,8 +154,6 @@ def find_telegram_by_tx(invictus_tx_id: str) -> Optional[int]:
 # EXTRATORES (Pix/QR/Link) – tolerantes a mudanças
 # =========================================================
 EMV_START = "000201"
-EMV_REGEX = re.compile(r"(000201[0-9A-Za-z].{50,})")
-
 URL_REGEX = re.compile(r"(https?://[^\s\"\\]+)")
 
 def walk_values(obj: Any):
@@ -169,7 +167,6 @@ def walk_values(obj: Any):
         yield obj
 
 def find_emv(resp_json: dict, raw_text: str) -> Optional[str]:
-    # procura EMV em qualquer string do JSON
     for v in walk_values(resp_json):
         if isinstance(v, str):
             s = v.strip()
@@ -181,18 +178,12 @@ def find_emv(resp_json: dict, raw_text: str) -> Optional[str]:
                 if len(cand) > 50:
                     return cand
 
-    # procura no texto cru
     if raw_text and EMV_START in raw_text:
-        # tenta capturar até aspas ou barra
         idx = raw_text.find(EMV_START)
         cand = raw_text[idx: idx + 3000]
-        # corta no fim provável
         cand = cand.split('"')[0].split("\\")[0].strip()
         if len(cand) > 50:
             return cand
-        m = EMV_REGEX.search(raw_text)
-        if m:
-            return m.group(1)
     return None
 
 def looks_like_base64(s: str) -> bool:
@@ -200,17 +191,11 @@ def looks_like_base64(s: str) -> bool:
         return False
     if s.startswith("data:image/") and "base64," in s:
         return True
-    # heurística: muitos chars válidos de base64 e tamanho grande
     allowed = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=\n\r")
     sample = s[:300]
     return all(c in allowed for c in sample)
 
 def find_qr_source(resp_json: dict, raw_text: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    retorna:
-      ("base64", base64_str) ou ("url", url) ou (None, None)
-    """
-    # JSON
     for v in walk_values(resp_json):
         if isinstance(v, str):
             s = v.strip()
@@ -222,7 +207,6 @@ def find_qr_source(resp_json: dict, raw_text: str) -> Tuple[Optional[str], Optio
                 if any(x in s.lower() for x in ["qr", "qrcode", "pix", ".png", ".jpg", ".jpeg"]):
                     return "url", s
 
-    # texto cru
     if raw_text:
         m = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=\n\r]+)", raw_text)
         if m:
@@ -235,29 +219,6 @@ def find_qr_source(resp_json: dict, raw_text: str) -> Tuple[Optional[str], Optio
                 return "url", u
 
     return None, None
-
-def find_payment_link(resp_json: dict, raw_text: str) -> Optional[str]:
-    # procura links prováveis no JSON
-    candidates = []
-    for v in walk_values(resp_json):
-        if isinstance(v, str):
-            s = v.strip()
-            if s.startswith("https://") or s.startswith("http://"):
-                candidates.append(s)
-
-    # prioriza links com cara de checkout/pagamento
-    for s in candidates:
-        low = s.lower()
-        if any(x in low for x in ["checkout", "pay", "payment", "pix", "invoice", "boleto"]):
-            return s
-
-    # fallback: qualquer URL no raw
-    if raw_text:
-        mu = URL_REGEX.search(raw_text)
-        if mu:
-            return mu.group(1)
-
-    return candidates[0] if candidates else None
 
 def generate_qr_from_emv(emv: str) -> BytesIO:
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M)
@@ -274,14 +235,13 @@ def generate_qr_from_emv(emv: str) -> BytesIO:
 # =========================================================
 # INVICTUS: criar transação PIX
 # =========================================================
-def invictus_create_pix(telegram_id: int) -> Tuple[dict, Optional[str], Optional[str], Tuple[Optional[str], Optional[str]], Optional[str], str]:
+def invictus_create_pix(telegram_id: int) -> Tuple[dict, Optional[str], Optional[str], Tuple[Optional[str], Optional[str]], str]:
     """
     Retorna:
       resp_json,
       tx_id,
       emv_copia_cola,
       (qr_kind, qr_value),
-      payment_link,
       raw_text
     """
     url = (
@@ -339,9 +299,8 @@ def invictus_create_pix(telegram_id: int) -> Tuple[dict, Optional[str], Optional
 
     emv = find_emv(resp_json, raw_text)
     qr_kind, qr_value = find_qr_source(resp_json, raw_text)
-    pay_link = find_payment_link(resp_json, raw_text)
 
-    return resp_json, tx_id, emv, (qr_kind, qr_value), pay_link, raw_text
+    return resp_json, tx_id, emv, (qr_kind, qr_value), raw_text
 
 
 # =========================================================
@@ -361,7 +320,6 @@ def fmt_dt(iso: Optional[str]) -> str:
         return "-"
     try:
         dt = datetime.fromisoformat(iso)
-        # mostra em UTC; se quiser, você pode converter pra horário local
         return dt.strftime("%Y-%m-%d %H:%M UTC")
     except Exception:
         return iso
@@ -398,7 +356,7 @@ async def pay_cb(call: types.CallbackQuery):
     log.info("CLICK PAY RECEBIDO - iniciando criação pix")
 
     try:
-        resp_json, tx_id, emv, (qr_kind, qr_val), pay_link, raw_text = invictus_create_pix(telegram_id)
+        resp_json, tx_id, emv, (qr_kind, qr_val), raw_text = invictus_create_pix(telegram_id)
         save_transaction(telegram_id, tx_id, "pending", resp_json)
 
         # Enviar QR
@@ -433,20 +391,17 @@ async def pay_cb(call: types.CallbackQuery):
             except Exception as e:
                 log.warning(f"Falha ao gerar/enviar QR do EMV: {e}")
 
-        # Monta mensagem de pagamento
+        # Mensagem sem URL do checkout (APENAS copia e cola)
         msg = "💳 **Pix gerado**\n\n"
         if emv:
             msg += f"📋 **Pix Copia e Cola:**\n`{emv}`\n\n"
-        if pay_link:
-            msg += f"🔗 **Link para pagamento:**\n{pay_link}\n\n"
         msg += "✅ Assim que o pagamento for confirmado, o acesso será liberado automaticamente."
 
         await call.message.answer(msg, parse_mode="Markdown")
         await call.answer()
 
-        # Se não achou EMV nem link, o log já vai mostrar o JSON real
-        if not emv and not pay_link:
-            log.warning("Não encontrei EMV nem link na resposta. Veja INVICTUS_CREATE_JSON nos logs.")
+        if not emv:
+            log.warning("Não encontrei EMV na resposta. Veja INVICTUS_CREATE_JSON nos logs.")
 
     except requests.HTTPError as e:
         await call.message.answer("❌ Erro ao gerar Pix (HTTP). Abra Render → Logs e veja INVICTUS: raw/status_code.")
@@ -468,11 +423,9 @@ async def invictus_postback(request: Request):
     payload = await request.json()
     log.info("INVICTUS_POSTBACK_JSON: " + json.dumps(payload, ensure_ascii=False)[:2500])
 
-    # extrai tx_id/status (heurístico)
     tx_id = str(payload.get("id") or payload.get("transaction_id") or payload.get("uuid") or "").strip()
     status = (payload.get("status") or payload.get("payment_status") or payload.get("state") or "").strip().lower()
 
-    # se vier dentro de data
     if (not tx_id) and isinstance(payload.get("data"), dict):
         d = payload["data"]
         tx_id = str(d.get("id") or d.get("transaction_id") or d.get("uuid") or "").strip()
@@ -489,7 +442,6 @@ async def invictus_postback(request: Request):
     if tx_id and status in approved_values:
         telegram_id = find_telegram_by_tx(tx_id)
 
-        # fallback tracking.telegram_id
         if not telegram_id:
             tracking = payload.get("tracking") or (payload.get("data") or {}).get("tracking")
             if isinstance(tracking, dict) and tracking.get("telegram_id"):
@@ -498,7 +450,6 @@ async def invictus_postback(request: Request):
         if telegram_id:
             expires_at = set_user_active(int(telegram_id))
 
-            # entrega do acesso
             try:
                 if GROUP_INVITE_LINK:
                     await bot.send_message(
@@ -535,11 +486,6 @@ async def invictus_postback(request: Request):
 # EXPIRAÇÃO / RENOVAÇÃO
 # =========================================================
 async def expiration_job():
-    """
-    A cada 10 minutos:
-      - expira quem passou do vencimento
-      - avisa o usuário pra renovar
-    """
     while True:
         try:
             conn = db()
